@@ -81,3 +81,11 @@ media/*
 !media/.gitkeep
 models/*
 !models/.gitkeep
+
+# Face gallery - ignore contents, keep directory
+friends_db/*
+!friends_db/.gitkeep
+
+# ToBeLabeled - ignore contents, keep directory
+ToBeLabeled/*
+!ToBeLabeled/.gitkeep
