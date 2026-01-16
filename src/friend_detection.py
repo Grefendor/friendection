@@ -1,9 +1,15 @@
+import os
 import cv2
 import numpy as np
 from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 from insightface.app import FaceAnalysis
 from sklearn.metrics.pairwise import cosine_similarity
+
+# Keep InsightFace assets inside the project models directory
+root_dir = Path(__file__).resolve().parents[1]
+models_dir = root_dir / "models"
+os.environ.setdefault("INSIGHTFACE_HOME", str(models_dir))
 
 class DoorFaceRecognizer:
     def __init__(self, providers=None, det_size=(640, 640)):

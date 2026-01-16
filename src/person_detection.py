@@ -7,7 +7,11 @@ def check_for_person(frame, model) -> bool:
         frame,
         device="cpu",
         conf=0.25,
-        verbose=False
+        verbose=False,
+        save=False,  # prevent YOLO from writing runs/detect/predict folders
+        save_txt=False,
+        save_conf=False,
+        save_crop=False,
     )
 
     for result in results:

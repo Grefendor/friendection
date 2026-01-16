@@ -205,7 +205,7 @@ try:
                                         if Path(photo_path).exists():
                                             dest_path = to_be_labeled_dir / f"unknown_{Path(photo_path).name}"
                                             shutil.move(photo_path, dest_path)
-                                            print(f"  Moved unknown face to ToBeLabeled/"))
+                                            print(f"  Moved unknown face to ToBeLabeled/")
                             elif not recognizer.gallery:
                                 print("Gallery empty; skip recognition.")
 
