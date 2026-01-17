@@ -19,14 +19,61 @@ os.environ.setdefault("INSIGHTFACE_HOME", str(models_dir))
 # Import InsightFace (suppress its verbose output)
 from insightface.app import FaceAnalysis
 
+def _get_best_providers() -> list:
+    """Auto-detect the best available ONNX Runtime execution providers."""
+    import onnxruntime as ort
+    available = ort.get_available_providers()
+    
+    # Priority order: TensorRT (Jetson) > CUDA (desktop GPU) > CPU
+    # Only include TensorRT if the library is actually loadable
+    preferred = []
+    
+    if "TensorrtExecutionProvider" in available:
+        try:
+            # Check if TensorRT libraries are actually available
+            import ctypes
+            ctypes.CDLL("libnvinfer.so", mode=ctypes.RTLD_GLOBAL)
+            preferred.append("TensorrtExecutionProvider")
+        except OSError:
+            pass  # TensorRT not installed, skip it
+    
+    if "CUDAExecutionProvider" in available:
+        # Check if CUDA compute capability is supported
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                compute_cap = float(result.stdout.strip().split('\n')[0])
+                # onnxruntime-gpu typically requires compute >= 6.0 for recent versions
+                if compute_cap >= 6.0:
+                    preferred.append("CUDAExecutionProvider")
+                else:
+                    print(f"GPU compute capability {compute_cap} < 6.0, using CPU (try onnxruntime-gpu==1.16.3)")
+            else:
+                preferred.append("CUDAExecutionProvider")  # Let it try
+        except Exception:
+            preferred.append("CUDAExecutionProvider")  # Let it try
+    
+    preferred.append("CPUExecutionProvider")
+    
+    print(f"ONNX Runtime providers: {preferred[0]} (available: {available})")
+    return preferred
+
 class DoorFaceRecognizer:
     def __init__(self, providers=None, det_size=(640, 640), verbose=False):
+        # Auto-detect best provider if not specified
+        if providers is None:
+            providers = _get_best_providers()
+        
         # Suppress InsightFace verbose model loading messages
         if verbose:
             self.app = FaceAnalysis(
                 name="buffalo_l",
                 allowed_modules=['detection', 'recognition'],
-                providers=providers or ["CPUExecutionProvider"]
+                providers=providers or ["CPUExecutionProvider"],
             )
             self.app.prepare(ctx_id=0, det_size=det_size)
         else:
@@ -35,17 +82,21 @@ class DoorFaceRecognizer:
                 self.app = FaceAnalysis(
                     name="buffalo_l",
                     allowed_modules=['detection', 'recognition'],
-                    providers=providers or ["CPUExecutionProvider"]
+                    providers=providers or ["CPUExecutionProvider"],
                 )
                 self.app.prepare(ctx_id=0, det_size=det_size)
         self.gallery: Dict[str, np.ndarray] = {}
         self._gallery_names: List[str] = []
         self._gallery_protos: Optional[np.ndarray] = None
+        self._gallery_protos_T: Optional[np.ndarray] = None
 
     def _embed(self, img: np.ndarray, strict: bool = True) -> Optional[np.ndarray]:
         """
         Extract face embedding from image using detection.
         """
+        # Ensure contiguous memory layout for ONNX Runtime
+        if not img.flags['C_CONTIGUOUS']:
+            img = np.ascontiguousarray(img)
         faces = self.app.get(img)
         if not faces:
             return None
@@ -165,9 +216,12 @@ class DoorFaceRecognizer:
         if gallery:
             self._gallery_names = list(gallery.keys())
             self._gallery_protos = np.vstack([gallery[n] for n in self._gallery_names])
+            # Pre-transpose for batch similarity computation (saves transpose per call)
+            self._gallery_protos_T = self._gallery_protos.T.astype(np.float32, copy=False)
         else:
             self._gallery_names = []
             self._gallery_protos = None
+            self._gallery_protos_T = None
         print(f"Gallery complete: {list(gallery.keys())}")
 
     def _get_gallery_matrix(self) -> Tuple[List[str], Optional[np.ndarray]]:
@@ -221,21 +275,35 @@ class DoorFaceRecognizer:
         names, protos = self._get_gallery_matrix()
         if protos is None:
             return [(None, 0.0) for _ in faces]
-        results = []
         
+        # Batch extract embeddings for vectorized similarity computation
+        embeddings = []
+        valid_indices = []
         for i, face in enumerate(faces):
-            # Use the embedding already extracted during detection
             e = getattr(face, 'normed_embedding', None)
-            if e is None:
+            if e is not None:
+                embeddings.append(e)
+                valid_indices.append(i)
+            else:
                 print(f"  Face {i}: no embedding available")
-                results.append((None, 0.0))
-                continue
-            
-            sims = protos @ e
-            idx = int(np.argmax(sims))
-            best_sim = float(sims[idx])
+        
+        # Initialize results with (None, 0.0) for all faces
+        results: List[Tuple[Optional[str], float]] = [(None, 0.0)] * len(faces)
+        
+        if not embeddings:
+            return results
+        
+        # Vectorized batch similarity: (num_faces, 512) @ (512, num_gallery) -> (num_faces, num_gallery)
+        emb_matrix = np.vstack(embeddings).astype(np.float32, copy=False)  # (N, 512)
+        all_sims = emb_matrix @ self._gallery_protos_T  # (N, num_gallery) - uses pre-transposed matrix
+        best_indices = np.argmax(all_sims, axis=1)
+        best_sims = all_sims[np.arange(len(embeddings)), best_indices]
+        
+        for j, orig_idx in enumerate(valid_indices):
+            idx = best_indices[j]
+            best_sim = float(best_sims[j])
             best_name = names[idx] if best_sim >= sim_thresh else None
-            print(f"  Face {i}: best match {names[idx]} sim={best_sim:.3f}")
-            results.append((best_name, best_sim))
+            print(f"  Face {orig_idx}: best match {names[idx]} sim={best_sim:.3f}")
+            results[orig_idx] = (best_name, best_sim)
         
         return results

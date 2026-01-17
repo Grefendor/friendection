@@ -1,119 +1,235 @@
-# Project1 – Door Person Recognition 🚪
+# Door Person Recognition System
 
-A lightweight door-camera pipeline that detects motion and persons, captures the sharpest face images, recognizes known people from a local gallery, and optionally sends Telegram alerts.
-
----
-
-## ✅ Key Capabilities
-
-- Motion detection using OpenCV MOG2 with adaptive background and brightness reinitialization.
-- Person detection using Ultralytics YOLO (`yolo12n.pt`).
-- Face detection via MediaPipe Tasks (wrapper `TaskFaceDetector`) — works with MediaPipe model assets (e.g. `blaze_face_short_range.tflite`).
-- Face recognition using InsightFace (`buffalo_l`) to build per-person prototypes from a `friends_db/` gallery.
-- Image-quality filtering (sharpness / blur check) and "capture the sharpest face" across multiple attempts.
-- Multi-vote confirmation and cooldown to avoid spurious notifications.
-- Auto-labeling: high-confidence recognitions are moved into the gallery; others are moved to `ToBeLabeled/` for review.
-- Optional Telegram notifications (text or photo) via `DoorNotifier` (uses environment variables or `.env`).
+A real-time door camera application that detects motion, captures faces, recognizes known individuals from a local gallery, and sends notifications via Telegram.
 
 ---
 
-## 🚀 Setup (Linux)
+## Disclaimer
 
-- Python 3.9+ recommended.
+This README was generated with AI assistance. The application code itself was developed with minimal AI involvement.
+
+---
+
+## Table of Contents
+
+- [Features](#features)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Configuration](#configuration)
+- [Usage](#usage)
+- [Project Structure](#project-structure)
+- [Parameters](#parameters)
+- [Troubleshooting](#troubleshooting)
+- [License](#license)
+
+---
+
+## Features
+
+- Motion detection using OpenCV MOG2 with adaptive background modeling and automatic brightness compensation
+- Face detection and recognition using InsightFace (buffalo_l model)
+- Image quality filtering with sharpness analysis to capture optimal frames
+- Multi-frame confirmation system to reduce false positives
+- Cooldown mechanism to prevent notification spam
+- Automatic gallery expansion for high-confidence recognitions
+- Manual review queue for uncertain detections
+- Telegram notifications with photo attachments
+- Automatic GPU detection and utilization (CUDA, TensorRT) when available
+- Optimized for edge devices (Raspberry Pi, NVIDIA Jetson)
+
+---
+
+## Requirements
+
+- Python 3.9 or higher
+- Camera device (USB webcam or CSI camera)
+- Supported platforms: Linux (x86_64, ARM64), Windows, macOS
+
+### Hardware Recommendations
+
+| Platform | Notes |
+|----------|-------|
+| Desktop/Laptop | CPU inference at approximately 10-12 FPS |
+| NVIDIA GPU (Compute 6.0+) | Install onnxruntime-gpu for acceleration |
+| Raspberry Pi 4/5 | Functional but slower; consider reducing det_size |
+| NVIDIA Jetson | Use JetPack's onnxruntime-gpu wheel for TensorRT acceleration |
+
+---
+
+## Installation
+
+1. Clone the repository:
+
+```bash
+git clone <repository-url>
+cd Project1
+```
+
+2. Create and activate a virtual environment:
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate
-pip install -U pip
-pip install ultralytics opencv-python insightface onnxruntime scikit-learn numpy python-dotenv python-telegram-bot
+source .venv/bin/activate  # Linux/macOS
+# or
+.venv\Scripts\activate     # Windows
 ```
 
-Note: `python-dotenv` is optional but convenient for loading `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` from a `.env` file.
+3. Install dependencies:
+
+```bash
+pip install -U pip
+pip install -r requirements.txt
+```
+
+4. (Optional) For NVIDIA GPU acceleration:
+
+```bash
+pip install onnxruntime-gpu
+```
 
 ---
 
-## 📁 Models
+## Configuration
 
-Place model files in `models/` (the repository keeps the folder but ignores weights):
+### Friend Gallery
 
-- `models/yolo12n.pt` — Ultralytics YOLO for person detection
-- `models/blaze_face_short_range.tflite` — example MediaPipe face model (used by `TaskFaceDetector`)
-
-InsightFace models are managed by `insightface` / `FaceAnalysis` (the `buffalo_l` model is used by the recognizer by default).
-
----
-
-## 🧑‍🤝‍🧑 Friend gallery
-
-Add people to `friends_db/` as subfolders:
+Create a directory structure for known individuals:
 
 ```
 friends_db/
-  Alice/
-    1.jpg
-    2.jpg
-  Bob/
-    pic1.png
+    PersonName1/
+        photo1.jpg
+        photo2.jpg
+    PersonName2/
+        photo1.png
+        photo2.jpg
 ```
 
-- Use 5–10 diverse photos per person (lighting, glasses, slight angles). Full images or face crops are both accepted.
-- The gallery is built at startup by `DoorFaceRecognizer.build_gallery()` and stores a single prototype embedding per person.
+Guidelines:
+- Use 5-10 photos per person with varied lighting and angles
+- Both full images and cropped faces are accepted
+- Supported formats: JPG, JPEG, PNG, BMP, WEBP
+
+### Telegram Notifications
+
+Create a `.env` file in the project root:
+
+```
+TELEGRAM_BOT_TOKEN=your_bot_token_here
+TELEGRAM_CHAT_ID=your_chat_id_here
+```
+
+To obtain these credentials:
+1. Create a bot via BotFather on Telegram
+2. Send a message to your bot, then retrieve your chat ID via the Telegram API
 
 ---
 
-## ⚙️ Running
+## Usage
+
+Start the application:
 
 ```bash
 source .venv/bin/activate
 python main.py
 ```
 
-- The program reads from the default camera (`cv2.VideoCapture(0)`), continuously looks for motion, verifies a person with YOLO, captures the sharpest face frames, runs recognition, and then acts (notify, auto-label, move files).
-- To enable Telegram, set environment variables or create a `.env` in the project root with:
+The application will:
+1. Initialize the camera and face recognition models
+2. Continuously monitor for motion
+3. When motion is detected, attempt face detection
+4. Compare detected faces against the gallery
+5. Send notifications for confirmed recognitions
+6. Save unknown faces to `ToBeLabeled/` for manual review
+
+To stop the application, press `Ctrl+C`.
+
+---
+
+## Project Structure
 
 ```
-TELEGRAM_BOT_TOKEN=your_token_here
-TELEGRAM_CHAT_ID=your_chat_id_here
+Project1/
+    main.py                 # Main application entry point
+    requirements.txt        # Python dependencies
+    .env                    # Telegram credentials (create manually)
+    friends_db/             # Known person galleries
+    ToBeLabeled/            # Unrecognized faces for review
+    models/                 # Model files (auto-downloaded)
+        buffalo_l/          # InsightFace face recognition model
+    src/
+        friend_detection.py # Face recognition logic
+        move_detection.py   # Motion detection logic
+        image_quality.py    # Sharpness calculation
+        telegram_bot.py     # Notification system
+    scripts/
+        benchmark_compare.py # Performance comparison tool
 ```
 
 ---
 
-## 🧰 Tuning & Default Parameters
+## Parameters
 
-Default values (see `main.py`):
+Key parameters in `main.py`:
 
-- MOTION_THRESHOLD = 7000 (motion_pixels threshold for detection)
-- BLUR_THRESHOLD = 100.0 (Laplacian variance below which an image is considered blurry)
-- CAPTURE_ATTEMPTS = 5 (frames to sample and choose the sharpest)
-- RECOGNITION_THRESHOLD = 2 (number of votes required to confirm a recognized person)
-- COOLDOWN_SECONDS = 10 (seconds to wait before re-confirming the same person)
-- AUTO_LABEL_THRESHOLD = 0.80 (>= this similarity will auto-add the photo to the person's gallery)
-- Recognition similarity used by default: sim_thresh ≈ 0.70
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| MOTION_THRESHOLD | 16000 | Pixel count threshold for motion detection |
+| BLUR_THRESHOLD | 100.0 | Minimum Laplacian variance (higher = stricter) |
+| CAPTURE_ATTEMPTS | 5 | Frames sampled to find sharpest face |
+| RECOGNITION_THRESHOLD | 2 | Confirmations required before notification |
+| COOLDOWN_SECONDS | 300 | Seconds before re-notifying for same person |
+| AUTO_LABEL_THRESHOLD | 0.80 | Similarity threshold for automatic gallery addition |
+| det_size | (160, 160) | Face detection resolution (lower = faster) |
 
-Tips:
-- Increase `det_size` in `DoorFaceRecognizer` (e.g. to `(960, 960)`) if faces are small.
-- Adjust `MOTION_THRESHOLD` based on your scene (busy streets vs. quiet porch).
-- Increase `BLUR_THRESHOLD` to be stricter about accepting only sharp crops.
+### Tuning Recommendations
 
----
-
-## 📦 File / Folder Behavior
-
-- Sharp, accepted face crops are saved to `images/` temporarily and then moved:
-  - Confirmed/high-confidence matches → appended into `friends_db/<Name>/` (auto-label)
-  - Low-confidence or unknown → moved to `ToBeLabeled/` for manual review
-- `images/`, `media/`, `models/`, and `friends_db/` contents are ignored by Git; `.gitkeep` keeps directories tracked.
+- Increase `MOTION_THRESHOLD` for high-traffic areas
+- Decrease `det_size` to `(128, 128)` on Raspberry Pi for better performance
+- Increase `det_size` to `(320, 320)` or higher if faces appear small in frame
+- Adjust `BLUR_THRESHOLD` based on camera quality and lighting conditions
 
 ---
 
-## 💡 Notes & Troubleshooting
+## Troubleshooting
 
-- If the gallery is empty, recognition is skipped and faces are instead saved for manual labeling.
-- `DoorNotifier` prints what it would send when Telegram credentials are missing; set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` to enable live notifications.
-- The project uses MediaPipe Tasks for face detection, InsightFace for embeddings, and YOLO for person verification.
+### No faces detected
+- Ensure adequate lighting
+- Increase `det_size` if faces are small or distant
+- Verify camera is functioning with a simple OpenCV test
+
+### High CPU usage
+- Reduce `det_size` to `(128, 128)` or `(160, 160)`
+- Increase `PROCESS_INTERVAL` in main.py
+
+### GPU not detected
+- Verify CUDA installation with `nvidia-smi`
+- Install correct onnxruntime-gpu version for your CUDA version
+- For older GPUs (Compute capability below 6.0), CPU fallback is automatic
+
+### Telegram notifications not working
+- Verify `.env` file exists and contains valid credentials
+- Ensure bot has been started (send /start to your bot)
+- Check network connectivity
 
 ---
 
 ## License
 
-Add your project license here.
+MIT License with Commons Clause
+
+Copyright (c) 2026
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+**Commons Clause Restriction:**
+
+The Software is provided to you by the Licensor under the License, as defined below, subject to the following condition:
+
+Without limiting other conditions in the License, the grant of rights under the License will not include, and the License does not grant to you, the right to Sell the Software.
+
+For purposes of the foregoing, "Sell" means practicing any or all of the rights granted to you under the License to provide to third parties, for a fee or other consideration (including without limitation fees for hosting or consulting/support services related to the Software), a product or service whose value derives, entirely or substantially, from the functionality of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.

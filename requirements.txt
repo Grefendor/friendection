@@ -1,0 +1,9 @@
+# Core dependencies
+numpy>=1.20
+opencv-python>=4.5
+insightface>=0.7
+onnxruntime>=1.10
+
+# Telegram notifications
+python-telegram-bot>=20.0
+python-dotenv>=0.19

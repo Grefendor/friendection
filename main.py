@@ -9,10 +9,13 @@ from concurrent.futures import ThreadPoolExecutor
 
 # Suppress ONNX Runtime info messages (0=verbose, 3=error only)
 os.environ["ONNXRUNTIME_LOG_LEVEL"] = "3"
+# Configure ONNX Runtime threading for better single-inference latency
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+os.environ.setdefault("ORT_DISABLE_TENSORRT", "1")
 
 # OpenCV optimizations (no behavior change)
 cv.setUseOptimized(True)
-cv.setNumThreads(1)
+cv.setNumThreads(4)  # Allow OpenCV to use multiple threads
 
 from src.move_detection import process_mog2
 from src.image_quality import calculate_sharpness, is_blurry
@@ -92,8 +95,8 @@ last_confirmed: Dict[str, float] = {}  # name -> timestamp of last confirmed rec
 # Using InsightFace for BOTH detection and recognition (single model, more efficient)
 friends_db = Path("friends_db")
 recognizer = DoorFaceRecognizer(
-    providers=["CPUExecutionProvider"],
-    det_size=(320, 320)  # Smaller detection size for faster processing on edge devices
+    providers=None,  # Auto-detect best provider (TensorRT > CUDA > CPU)
+    det_size=(160, 160)  # Smaller detection size for faster processing (still detects faces reliably)
 )
 if friends_db.exists():
     recognizer.build_gallery(str(friends_db))
