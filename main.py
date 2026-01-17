@@ -7,15 +7,14 @@ from typing import Dict, List, Tuple, Optional
 from threading import Thread
 from concurrent.futures import ThreadPoolExecutor
 
-# Suppress ONNX Runtime info messages (0=verbose, 3=error only)
-os.environ["ONNXRUNTIME_LOG_LEVEL"] = "3"
-# Configure ONNX Runtime threading for better single-inference latency
-os.environ.setdefault("OMP_NUM_THREADS", "4")
-os.environ.setdefault("ORT_DISABLE_TENSORRT", "1")
+# ONNX Runtime configuration
+os.environ["ONNXRUNTIME_LOG_LEVEL"] = "3"  # Suppress info messages (error only)
+os.environ.setdefault("OMP_NUM_THREADS", "4")  # Thread count for inference
+os.environ.setdefault("ORT_DISABLE_TENSORRT", "1")  # Disable TensorRT by default
 
-# OpenCV optimizations (no behavior change)
+# OpenCV optimization settings
 cv.setUseOptimized(True)
-cv.setNumThreads(4)  # Allow OpenCV to use multiple threads
+cv.setNumThreads(4)
 
 from src.move_detection import process_mog2
 from src.image_quality import calculate_sharpness, is_blurry
@@ -47,56 +46,56 @@ class CameraBuffer:
         self.stopped = True
         self._thread.join(timeout=1.0)
 
+# Camera initialization
 cap = cv.VideoCapture(0)
 if not cap.isOpened():
     print("Cannot open camera")
     exit()
 
-# Optimization: Reduce resolution for faster processing on edge devices
 cap.set(cv.CAP_PROP_FRAME_WIDTH, 640)
 cap.set(cv.CAP_PROP_FRAME_HEIGHT, 480)
 
-# Threaded camera buffer - eliminates blocking on frame reads
 camera = CameraBuffer(cap)
 
+# Background subtraction configuration
 backSub = cv.createBackgroundSubtractorMOG2(history=500, varThreshold=16, detectShadows=True)
 kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, (3, 3))
 prev_brightness = None
-BRIGHTNESS_RESET_DELTA = 40
-ADAPT_LR = 0.01 # Learning rate for background adaption
+BRIGHTNESS_RESET_DELTA = 40  # Threshold for brightness change detection
+ADAPT_LR = 0.01  # Background model learning rate
 
 root = Path(__file__).resolve().parents[1]
 
 to_be_labeled_dir = Path("ToBeLabeled")
 to_be_labeled_dir.mkdir(parents=True, exist_ok=True)
 
-MOTION_THRESHOLD = 16000
-BLUR_THRESHOLD = 100.0
-CAPTURE_ATTEMPTS = 5
-RECOGNITION_THRESHOLD = 2  # Require this many successful recognitions to confirm
-COOLDOWN_SECONDS = 300  # 5 minutes - wait before re-notifying for same person
-AUTO_LABEL_THRESHOLD = 0.80  # Auto-add to gallery if confidence >= 80%
+# Detection and recognition thresholds
+MOTION_THRESHOLD = 16000  # Minimum pixels for motion detection
+BLUR_THRESHOLD = 100.0  # Laplacian variance threshold for blur detection
+CAPTURE_ATTEMPTS = 5  # Number of frames to capture for best quality selection
+RECOGNITION_THRESHOLD = 2  # Required consecutive recognitions for confirmation
+COOLDOWN_SECONDS = 300  # Notification cooldown per person (seconds)
+AUTO_LABEL_THRESHOLD = 0.80  # Minimum confidence for automatic gallery addition
 
 person_counter = 0
 
-# Thread pool for async Telegram notifications (non-blocking)
+# Async executors for non-blocking I/O operations
 notification_executor = ThreadPoolExecutor(max_workers=1)
 save_executor = ThreadPoolExecutor(max_workers=2)
 
-# Time-based processing instead of frame counting (more efficient)
-PROCESS_INTERVAL = 0.5  # Process every 0.5 seconds instead of every 30 frames
+# Frame processing interval (seconds)
+PROCESS_INTERVAL = 0.5
 last_process_time = 0.0
 
-# Track recognition votes per person across detection events
-recognition_votes: Dict[str, int] = {}
-last_confirmed: Dict[str, float] = {}  # name -> timestamp of last confirmed recognition
+# Recognition state tracking
+recognition_votes: Dict[str, int] = {}  # Vote count per person
+last_confirmed: Dict[str, float] = {}  # Last confirmation timestamp per person
 
-# Build face gallery once at startup (friends_db/Name/*.jpg)
-# Using InsightFace for BOTH detection and recognition (single model, more efficient)
+# Face recognition setup
 friends_db = Path("friends_db")
 recognizer = DoorFaceRecognizer(
-    providers=None,  # Auto-detect best provider (TensorRT > CUDA > CPU)
-    det_size=(160, 160)  # Smaller detection size for faster processing (still detects faces reliably)
+    providers=None,  # Auto-detect: TensorRT > CUDA > CPU
+    det_size=(160, 160)  # Detection resolution (lower = faster)
 )
 if friends_db.exists():
     recognizer.build_gallery(str(friends_db))
@@ -156,14 +155,12 @@ def capture_sharpest_faces(
         avg_sharpness = total_sharpness / len(faces)
         print(f"  Attempt {attempt_no}: sharpness={avg_sharpness:.2f}, faces={len(faces)}")
 
-        # Keep only if sharper than previous best
         if avg_sharpness > best_sharpness:
             best_sharpness = avg_sharpness
             best_frame = frame
             best_faces = faces
             best_attempt = attempt_no
 
-            # Early exit if sharpness is good enough
             if avg_sharpness >= GOOD_SHARPNESS_THRESHOLD:
                 print(f"  Early exit: sharpness {avg_sharpness:.2f} exceeds threshold")
                 return True
@@ -237,8 +234,6 @@ try:
             )
 
             if motion:
-                # Use InsightFace directly for face detection (no YOLO needed)
-                # If we detect a face, a person is definitely there
                 quick_faces = app_get(frame)
                 
                 if quick_faces:
@@ -268,9 +263,7 @@ try:
                                     crops.append(None)
                                     print(f"Skipped blurry face {i}")
 
-                            # Identify faces using embeddings already extracted by InsightFace
                             if best_faces and recognizer.gallery:
-                                # Use embeddings directly from detection (more efficient)
                                 results = recognizer.identify_from_faces(best_faces, sim_thresh=0.70)
                                 current_time = time_time()
                                 
@@ -281,24 +274,20 @@ try:
                                         continue
                                     
                                     if name:
-                                        # Check cooldown
                                         if name in last_confirmed:
                                             elapsed = current_time - last_confirmed[name]
                                             if elapsed < COOLDOWN_SECONDS:
                                                 print(f"  {name} on cooldown ({COOLDOWN_SECONDS - elapsed:.1f}s remaining)")
                                                 continue
                                         
-                                        # Add vote
                                         recognition_votes[name] = recognition_votes.get(name, 0) + 1
                                         print(f"  Vote for {name}: {recognition_votes[name]}/{RECOGNITION_THRESHOLD} (sim={sim:.3f})")
                                         
-                                        # Check if threshold reached
                                         if recognition_votes[name] >= RECOGNITION_THRESHOLD:
                                             print(f"*** CONFIRMED: {name} at the door! ***")
                                             last_confirmed[name] = current_time
-                                            recognition_votes[name] = 0  # Reset votes
+                                            recognition_votes[name] = 0
                                             
-                                            # Move file first, then send notification with final path
                                             if sim >= AUTO_LABEL_THRESHOLD:
                                                 dest_dir = friends_db / name
                                                 dest_dir.mkdir(parents=True, exist_ok=True)
@@ -308,13 +297,12 @@ try:
                                             else:
                                                 dest_path = to_be_labeled_dir / f"{name}_{ts_ms}_{idx}.jpg"
                                                 submit_save(dest_path, crop, (name, sim, str(dest_path)))
-                                                print(f"  Moved to ToBeLabeled/ for review (sim={sim:.0%})")
+                                                print(f"  Saved to ToBeLabeled/ for review (sim={sim:.0%})")
                                     else:
                                         print(f"  Unknown visitor (best_sim={sim:.3f})")
-                                        # Save unknown faces directly to ToBeLabeled
                                         dest_path = to_be_labeled_dir / f"unknown_{ts_ms}_{idx}.jpg"
                                         submit_save(dest_path, crop)
-                                        print(f"  Moved unknown face to ToBeLabeled/")
+                                        print(f"  Saved unknown face to ToBeLabeled/")
                             elif not recognizer.gallery:
                                 print("Gallery empty; skip recognition.")
 
@@ -325,11 +313,10 @@ try:
             else:
                 person_counter = 0
 
-        # Small sleep to prevent CPU spinning (no GUI needed)
         time.sleep(0.01)
 
 finally:
     camera.stop()
     cap.release()
-    notification_executor.shutdown(wait=False)  # Don't wait for pending notifications
+    notification_executor.shutdown(wait=False)
     save_executor.shutdown(wait=False)

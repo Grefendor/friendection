@@ -20,25 +20,25 @@ os.environ.setdefault("INSIGHTFACE_HOME", str(models_dir))
 from insightface.app import FaceAnalysis
 
 def _get_best_providers() -> list:
-    """Auto-detect the best available ONNX Runtime execution providers."""
+    """
+    Detect available ONNX Runtime execution providers.
+    
+    Returns providers in priority order: TensorRT > CUDA > CPU.
+    Validates that GPU libraries are actually loadable before including them.
+    """
     import onnxruntime as ort
     available = ort.get_available_providers()
-    
-    # Priority order: TensorRT (Jetson) > CUDA (desktop GPU) > CPU
-    # Only include TensorRT if the library is actually loadable
     preferred = []
     
     if "TensorrtExecutionProvider" in available:
         try:
-            # Check if TensorRT libraries are actually available
             import ctypes
             ctypes.CDLL("libnvinfer.so", mode=ctypes.RTLD_GLOBAL)
             preferred.append("TensorrtExecutionProvider")
         except OSError:
-            pass  # TensorRT not installed, skip it
+            pass
     
     if "CUDAExecutionProvider" in available:
-        # Check if CUDA compute capability is supported
         try:
             import subprocess
             result = subprocess.run(
@@ -47,15 +47,14 @@ def _get_best_providers() -> list:
             )
             if result.returncode == 0:
                 compute_cap = float(result.stdout.strip().split('\n')[0])
-                # onnxruntime-gpu typically requires compute >= 6.0 for recent versions
                 if compute_cap >= 6.0:
                     preferred.append("CUDAExecutionProvider")
                 else:
-                    print(f"GPU compute capability {compute_cap} < 6.0, using CPU (try onnxruntime-gpu==1.16.3)")
+                    print(f"GPU compute capability {compute_cap} < 6.0, using CPU")
             else:
-                preferred.append("CUDAExecutionProvider")  # Let it try
+                preferred.append("CUDAExecutionProvider")
         except Exception:
-            preferred.append("CUDAExecutionProvider")  # Let it try
+            preferred.append("CUDAExecutionProvider")
     
     preferred.append("CPUExecutionProvider")
     
@@ -92,9 +91,15 @@ class DoorFaceRecognizer:
 
     def _embed(self, img: np.ndarray, strict: bool = True) -> Optional[np.ndarray]:
         """
-        Extract face embedding from image using detection.
+        Extract face embedding from an image.
+        
+        Args:
+            img: Input image in BGR format.
+            strict: If True, applies stricter quality thresholds.
+            
+        Returns:
+            Normalized 512-dimensional embedding or None if no valid face found.
         """
-        # Ensure contiguous memory layout for ONNX Runtime
         if not img.flags['C_CONTIGUOUS']:
             img = np.ascontiguousarray(img)
         faces = self.app.get(img)
@@ -124,20 +129,25 @@ class DoorFaceRecognizer:
 
     def _embed_cropped(self, img: np.ndarray) -> Optional[np.ndarray]:
         """
-        Extract embedding from an already-cropped face image.
-        Resizes to 112x112 and runs recognition model directly.
+        Extract embedding from a pre-cropped face image.
+        
+        Falls back to direct model inference if detection fails.
+        
+        Args:
+            img: Cropped face image in BGR format.
+            
+        Returns:
+            Normalized 512-dimensional embedding or None on failure.
         """
         if img is None or img.size == 0:
             return None
         
-        # Try detection first (in case image has some margin)
         faces = self.app.get(img)
         if faces:
             f = max(faces, key=lambda x: x.det_score)
             return f.normed_embedding
         
-        # If detection fails, use recognition model directly on resized crop
-        # Find the recognition model (w600k_r50)
+        # Fall back to direct recognition model inference
         rec_model = None
         for name, model in self.app.models.items():
             if 'recognition' in name or 'w600k' in str(getattr(model, 'onnx_file', '')):
@@ -147,16 +157,13 @@ class DoorFaceRecognizer:
         if rec_model is None:
             return None
         
-        # Resize to ArcFace input size (112x112)
+        # Prepare input tensor
         face_img = cv2.resize(img, (112, 112))
-        
-        # Prepare input: BGR -> RGB, HWC -> CHW, normalize
         face_rgb = cv2.cvtColor(face_img, cv2.COLOR_BGR2RGB)
         face_input = np.transpose(face_rgb, (2, 0, 1)).astype(np.float32)
         face_input = (face_input - 127.5) / 127.5
         face_input = np.expand_dims(face_input, axis=0)
         
-        # Run inference
         try:
             embedding = rec_model.session.run(None, {rec_model.session.get_inputs()[0].name: face_input})[0][0]
             # L2 normalize
@@ -167,8 +174,13 @@ class DoorFaceRecognizer:
 
     def build_gallery(self, db_path: str) -> None:
         """
-        Build gallery from friends_db/Name/*.jpg structure.
-        Handles both full images and pre-cropped face images.
+        Build face embedding gallery from directory structure.
+        
+        Expected structure: db_path/PersonName/*.jpg
+        Creates averaged prototype embedding for each person.
+        
+        Args:
+            db_path: Path to the gallery database directory.
         """
         gallery = {}
         db = Path(db_path)
@@ -212,11 +224,10 @@ class DoorFaceRecognizer:
                 print(f"  {person_dir.name}: no embeddings")
                 
         self.gallery = gallery
-        # Cache matrix for fast similarity (cosine == dot for L2-normalized vectors)
+        # Pre-compute matrices for efficient batch similarity
         if gallery:
             self._gallery_names = list(gallery.keys())
             self._gallery_protos = np.vstack([gallery[n] for n in self._gallery_names])
-            # Pre-transpose for batch similarity computation (saves transpose per call)
             self._gallery_protos_T = self._gallery_protos.T.astype(np.float32, copy=False)
         else:
             self._gallery_names = []
@@ -262,15 +273,14 @@ class DoorFaceRecognizer:
 
     def identify_from_faces(self, faces: List, sim_thresh=0.70) -> List[Tuple[Optional[str], float]]:
         """
-        Identify faces using pre-extracted embeddings from InsightFace detection.
-        This is more efficient than identify_all() because embeddings are already computed.
+        Identify faces using pre-extracted embeddings.
         
         Args:
-            faces: List of InsightFace Face objects (from app.get())
-            sim_thresh: Similarity threshold for positive identification
+            faces: List of InsightFace Face objects with embeddings.
+            sim_thresh: Minimum cosine similarity for positive match.
             
         Returns:
-            List of (name, similarity) tuples for each face
+            List of (name, similarity) tuples. Name is None if below threshold.
         """
         names, protos = self._get_gallery_matrix()
         if protos is None:
@@ -293,9 +303,9 @@ class DoorFaceRecognizer:
         if not embeddings:
             return results
         
-        # Vectorized batch similarity: (num_faces, 512) @ (512, num_gallery) -> (num_faces, num_gallery)
-        emb_matrix = np.vstack(embeddings).astype(np.float32, copy=False)  # (N, 512)
-        all_sims = emb_matrix @ self._gallery_protos_T  # (N, num_gallery) - uses pre-transposed matrix
+        # Batch cosine similarity computation
+        emb_matrix = np.vstack(embeddings).astype(np.float32, copy=False)
+        all_sims = emb_matrix @ self._gallery_protos_T
         best_indices = np.argmax(all_sims, axis=1)
         best_sims = all_sims[np.arange(len(embeddings)), best_indices]
         

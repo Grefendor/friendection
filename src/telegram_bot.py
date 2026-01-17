@@ -1,3 +1,5 @@
+"""Telegram notification service for door detection alerts."""
+
 import os
 import asyncio
 from pathlib import Path
@@ -5,15 +7,14 @@ from typing import Optional
 from telegram import Bot
 from telegram.error import TelegramError
 
-# Load .env file from project root
+# Environment configuration
 try:
     from dotenv import load_dotenv
     env_path = Path(__file__).resolve().parents[1] / ".env"
     load_dotenv(env_path)
 except ImportError:
-    pass  # dotenv not installed, use environment variables directly
+    pass
 
-# Load from environment or .env file
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 

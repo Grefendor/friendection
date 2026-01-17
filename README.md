@@ -6,7 +6,7 @@ A real-time door camera application that detects motion, captures faces, recogni
 
 ## Disclaimer
 
-This README was generated with AI assistance. The application code itself was developed with minimal AI involvement.
+This README and the comments within the source code were generated with AI assistance.
 
 ---
 
