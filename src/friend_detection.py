@@ -1,20 +1,44 @@
 import os
+import sys
+import warnings
 import cv2
 import numpy as np
 from typing import Dict, List, Optional, Tuple
 from pathlib import Path
-from insightface.app import FaceAnalysis
+from contextlib import redirect_stdout, redirect_stderr
+from io import StringIO
 from sklearn.metrics.pairwise import cosine_similarity
+
+# Suppress FutureWarning from insightface/skimage before importing
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 # Keep InsightFace assets inside the project models directory
 root_dir = Path(__file__).resolve().parents[1]
 models_dir = root_dir / "models"
 os.environ.setdefault("INSIGHTFACE_HOME", str(models_dir))
 
+# Import InsightFace (suppress its verbose output)
+from insightface.app import FaceAnalysis
+
 class DoorFaceRecognizer:
-    def __init__(self, providers=None, det_size=(640, 640)):
-        self.app = FaceAnalysis(name="buffalo_l", providers=providers or ["CPUExecutionProvider"])
-        self.app.prepare(ctx_id=0, det_size=det_size)
+    def __init__(self, providers=None, det_size=(640, 640), verbose=False):
+        # Suppress InsightFace verbose model loading messages
+        if verbose:
+            self.app = FaceAnalysis(
+                name="buffalo_l",
+                allowed_modules=['detection', 'recognition'],
+                providers=providers or ["CPUExecutionProvider"]
+            )
+            self.app.prepare(ctx_id=0, det_size=det_size)
+        else:
+            # Redirect stdout/stderr during initialization
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                self.app = FaceAnalysis(
+                    name="buffalo_l",
+                    allowed_modules=['detection', 'recognition'],
+                    providers=providers or ["CPUExecutionProvider"]
+                )
+                self.app.prepare(ctx_id=0, det_size=det_size)
         self.gallery: Dict[str, np.ndarray] = {}
 
     def _embed(self, img: np.ndarray, strict: bool = True) -> Optional[np.ndarray]:
@@ -36,9 +60,14 @@ class DoorFaceRecognizer:
         h = f.bbox[3] - f.bbox[1]
         if min(w, h) < min_size:
             return None
-        yaw, pitch, _ = getattr(f, "pose", (0, 0, 0))
-        if abs(yaw) > max_angle or abs(pitch) > max_angle:
-            return None
+        
+        # Handle pose check - pose may be None when landmark models are skipped
+        pose = getattr(f, "pose", None)
+        if pose is not None:
+            yaw, pitch, _ = pose
+            if abs(yaw) > max_angle or abs(pitch) > max_angle:
+                return None
+        
         return f.normed_embedding
 
     def _embed_cropped(self, img: np.ndarray) -> Optional[np.ndarray]:
@@ -162,6 +191,42 @@ class DoorFaceRecognizer:
             best_sim = float(sims[idx])
             best_name = names[idx] if best_sim >= sim_thresh else None
             print(f"  Crop {i} ({method}): best match {names[idx]} sim={best_sim:.3f}")
+            results.append((best_name, best_sim))
+        
+        return results
+
+    def identify_from_faces(self, faces: List, sim_thresh=0.70) -> List[Tuple[Optional[str], float]]:
+        """
+        Identify faces using pre-extracted embeddings from InsightFace detection.
+        This is more efficient than identify_all() because embeddings are already computed.
+        
+        Args:
+            faces: List of InsightFace Face objects (from app.get())
+            sim_thresh: Similarity threshold for positive identification
+            
+        Returns:
+            List of (name, similarity) tuples for each face
+        """
+        if not self.gallery:
+            return [(None, 0.0) for _ in faces]
+        
+        names, protos = zip(*self.gallery.items())
+        protos = np.vstack(protos)
+        results = []
+        
+        for i, face in enumerate(faces):
+            # Use the embedding already extracted during detection
+            e = getattr(face, 'normed_embedding', None)
+            if e is None:
+                print(f"  Face {i}: no embedding available")
+                results.append((None, 0.0))
+                continue
+            
+            sims = cosine_similarity([e], protos)[0]
+            idx = int(np.argmax(sims))
+            best_sim = float(sims[idx])
+            best_name = names[idx] if best_sim >= sim_thresh else None
+            print(f"  Face {i}: best match {names[idx]} sim={best_sim:.3f}")
             results.append((best_name, best_sim))
         
         return results
