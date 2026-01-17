@@ -1,5 +1,4 @@
 import time
-import shutil
 import os
 import numpy as np
 import cv2 as cv
@@ -10,6 +9,10 @@ from concurrent.futures import ThreadPoolExecutor
 
 # Suppress ONNX Runtime info messages (0=verbose, 3=error only)
 os.environ["ONNXRUNTIME_LOG_LEVEL"] = "3"
+
+# OpenCV optimizations (no behavior change)
+cv.setUseOptimized(True)
+cv.setNumThreads(1)
 
 from src.move_detection import process_mog2
 from src.image_quality import calculate_sharpness, is_blurry
@@ -57,17 +60,14 @@ backSub = cv.createBackgroundSubtractorMOG2(history=500, varThreshold=16, detect
 kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, (3, 3))
 prev_brightness = None
 BRIGHTNESS_RESET_DELTA = 40
-ADAPT_LR = 0.01
+ADAPT_LR = 0.01 # Learning rate for background adaption
 
 root = Path(__file__).resolve().parents[1]
-
-images_dir = Path("images")
-images_dir.mkdir(parents=True, exist_ok=True)
 
 to_be_labeled_dir = Path("ToBeLabeled")
 to_be_labeled_dir.mkdir(parents=True, exist_ok=True)
 
-MOTION_THRESHOLD = 7000
+MOTION_THRESHOLD = 16000
 BLUR_THRESHOLD = 100.0
 CAPTURE_ATTEMPTS = 5
 RECOGNITION_THRESHOLD = 2  # Require this many successful recognitions to confirm
@@ -78,6 +78,7 @@ person_counter = 0
 
 # Thread pool for async Telegram notifications (non-blocking)
 notification_executor = ThreadPoolExecutor(max_workers=1)
+save_executor = ThreadPoolExecutor(max_workers=2)
 
 # Time-based processing instead of frame counting (more efficient)
 PROCESS_INTERVAL = 0.5  # Process every 0.5 seconds instead of every 30 frames
@@ -108,7 +109,13 @@ if notifier.is_configured():
 else:
     print("Telegram not configured. Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID env vars.")
 
-def capture_sharpest_faces(cap, recognizer: DoorFaceRecognizer, num_attempts: int = 5) -> Tuple[Optional[np.ndarray], List, float]:
+def capture_sharpest_faces(
+    cap,
+    recognizer: DoorFaceRecognizer,
+    num_attempts: int = 5,
+    initial_frame: Optional[np.ndarray] = None,
+    initial_faces: Optional[List] = None,
+) -> Tuple[Optional[np.ndarray], List, float]:
     """
     Capture multiple frames and return the sharpest one with detected faces.
     Uses InsightFace for detection (same model used for recognition).
@@ -122,16 +129,17 @@ def capture_sharpest_faces(cap, recognizer: DoorFaceRecognizer, num_attempts: in
     best_sharpness = 0.0
     best_attempt = -1
 
-    for attempt in range(num_attempts):
-        ret, frame = cap.read()
-        if not ret or frame is None:
-            continue
+    def _evaluate(frame: np.ndarray, faces: Optional[List], attempt_no: int) -> bool:
+        nonlocal best_frame, best_faces, best_sharpness, best_attempt
+        if frame is None:
+            return False
 
         # Use InsightFace for detection (reuses the same model as recognition)
-        faces = recognizer.app.get(frame)
+        if faces is None:
+            faces = recognizer.app.get(frame)
 
         if not faces:
-            continue
+            return False
 
         # Calculate average sharpness of all detected faces
         total_sharpness = 0.0
@@ -143,25 +151,64 @@ def capture_sharpest_faces(cap, recognizer: DoorFaceRecognizer, num_attempts: in
                 total_sharpness += calculate_sharpness(crop)
 
         avg_sharpness = total_sharpness / len(faces)
-        print(f"  Attempt {attempt + 1}: sharpness={avg_sharpness:.2f}, faces={len(faces)}")
+        print(f"  Attempt {attempt_no}: sharpness={avg_sharpness:.2f}, faces={len(faces)}")
 
         # Keep only if sharper than previous best
         if avg_sharpness > best_sharpness:
             best_sharpness = avg_sharpness
             best_frame = frame
             best_faces = faces
-            best_attempt = attempt + 1
-            
+            best_attempt = attempt_no
+
             # Early exit if sharpness is good enough
             if avg_sharpness >= GOOD_SHARPNESS_THRESHOLD:
                 print(f"  Early exit: sharpness {avg_sharpness:.2f} exceeds threshold")
-                break
+                return True
+        return False
+
+    attempt_no = 1
+    if initial_frame is not None:
+        if _evaluate(initial_frame, initial_faces, attempt_no):
+            return best_frame, best_faces, best_sharpness
+        attempt_no += 1
+
+    for _ in range(attempt_no - 1, num_attempts):
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            attempt_no += 1
+            continue
+        if _evaluate(frame, None, attempt_no):
+            break
+        attempt_no += 1
 
     if best_attempt > 0:
         print(f"  Selected attempt {best_attempt} with sharpness {best_sharpness:.2f}")
 
     return best_frame, best_faces, best_sharpness
 
+
+app_get = recognizer.app.get
+is_blurry_fn = is_blurry
+time_time = time.time
+
+
+def submit_save(dest_path: Path, crop: np.ndarray, notify_args: Optional[Tuple[str, float, str]] = None) -> None:
+    crop_copy = crop.copy()
+    def _save() -> bool:
+        return cv.imwrite(str(dest_path), crop_copy, [cv.IMWRITE_JPEG_QUALITY, 85])
+
+    future = save_executor.submit(_save)
+
+    if notify_args is not None:
+        def _after_save(fut):
+            try:
+                ok = fut.result()
+            except Exception:
+                ok = False
+            if ok:
+                name, sim, path_str = notify_args
+                notification_executor.submit(notifier.notify_person, name, sim, path_str)
+        future.add_done_callback(_after_save)
 
 try:
     while True:
@@ -170,7 +217,7 @@ try:
             time.sleep(0.01)  # Wait for camera to provide frame
             continue
 
-        current_time = time.time()
+        current_time = time_time()
         
         # Time-based processing: only process at specified interval
         if current_time - last_process_time >= PROCESS_INTERVAL:
@@ -183,12 +230,13 @@ try:
                 BRIGHTNESS_RESET_DELTA,
                 ADAPT_LR,
                 MOTION_THRESHOLD,
+                draw_overlay=False,
             )
 
             if motion:
                 # Use InsightFace directly for face detection (no YOLO needed)
                 # If we detect a face, a person is definitely there
-                quick_faces = recognizer.app.get(frame)
+                quick_faces = app_get(frame)
                 
                 if quick_faces:
                     person_counter += 1
@@ -196,34 +244,38 @@ try:
                         print("Face detected - capturing best frame!")
 
                         best_frame, best_faces, sharpness = capture_sharpest_faces(
-                            cap, recognizer, CAPTURE_ATTEMPTS
+                            cap,
+                            recognizer,
+                            CAPTURE_ATTEMPTS,
+                            initial_frame=frame,
+                            initial_faces=quick_faces,
                         )
 
                         if best_frame is not None and best_faces:
                             ts_ms = int(time.time() * 1000)
-                            crops = []
+                            crops: List[Optional[np.ndarray]] = []
                             for i, f in enumerate(best_faces):
                                 bbox = f.bbox.astype(int)
                                 x1, y1, x2, y2 = bbox[0], bbox[1], bbox[2], bbox[3]
                                 cropped_face = best_frame[y1:y2, x1:x2]
-                                if cropped_face.size > 0 and not is_blurry(cropped_face, BLUR_THRESHOLD):
+                                if cropped_face.size > 0 and not is_blurry_fn(cropped_face, BLUR_THRESHOLD):
                                     crops.append(cropped_face)
-                                    # Use JPEG for faster saves (5-10x faster than PNG)
-                                    cv.imwrite(str(images_dir / f"detected_face_{ts_ms}_{i}.jpg"), cropped_face,
-                                               [cv.IMWRITE_JPEG_QUALITY, 85])
-                                    print(f"Saved face {i} with sharpness: {sharpness:.2f}")
+                                    print(f"Accepted face {i} with sharpness: {sharpness:.2f}")
                                 else:
+                                    crops.append(None)
                                     print(f"Skipped blurry face {i}")
 
                             # Identify faces using embeddings already extracted by InsightFace
                             if best_faces and recognizer.gallery:
                                 # Use embeddings directly from detection (more efficient)
                                 results = recognizer.identify_from_faces(best_faces, sim_thresh=0.70)
-                                current_time = time.time()
+                                current_time = time_time()
                                 
                                 for idx, (name, sim) in enumerate(results):
-                                    # Get the saved photo path for this crop
-                                    photo_path = str(images_dir / f"detected_face_{ts_ms}_{idx}.jpg")
+                                    crop = crops[idx] if idx < len(crops) else None
+                                    if crop is None:
+                                        print("  Skipping notification/save: crop not available")
+                                        continue
                                     
                                     if name:
                                         # Check cooldown
@@ -247,24 +299,19 @@ try:
                                             if sim >= AUTO_LABEL_THRESHOLD:
                                                 dest_dir = friends_db / name
                                                 dest_dir.mkdir(parents=True, exist_ok=True)
-                                                dest_path = dest_dir / Path(photo_path).name
-                                                shutil.move(photo_path, dest_path)
+                                                dest_path = dest_dir / f"{ts_ms}_{idx}.jpg"
+                                                submit_save(dest_path, crop, (name, sim, str(dest_path)))
                                                 print(f"  Auto-added to {dest_dir.name}/ (sim={sim:.0%})")
                                             else:
-                                                dest_path = to_be_labeled_dir / f"{name}_{Path(photo_path).name}"
-                                                shutil.move(photo_path, dest_path)
+                                                dest_path = to_be_labeled_dir / f"{name}_{ts_ms}_{idx}.jpg"
+                                                submit_save(dest_path, crop, (name, sim, str(dest_path)))
                                                 print(f"  Moved to ToBeLabeled/ for review (sim={sim:.0%})")
-                                            
-                                            # Send Telegram notification asynchronously (non-blocking)
-                                            # Use dest_path since file was already moved
-                                            notification_executor.submit(notifier.notify_person, name, sim, str(dest_path))
                                     else:
                                         print(f"  Unknown visitor (best_sim={sim:.3f})")
-                                        # Move unknown faces to ToBeLabeled
-                                        if Path(photo_path).exists():
-                                            dest_path = to_be_labeled_dir / f"unknown_{Path(photo_path).name}"
-                                            shutil.move(photo_path, dest_path)
-                                            print(f"  Moved unknown face to ToBeLabeled/")
+                                        # Save unknown faces directly to ToBeLabeled
+                                        dest_path = to_be_labeled_dir / f"unknown_{ts_ms}_{idx}.jpg"
+                                        submit_save(dest_path, crop)
+                                        print(f"  Moved unknown face to ToBeLabeled/")
                             elif not recognizer.gallery:
                                 print("Gallery empty; skip recognition.")
 
@@ -282,3 +329,4 @@ finally:
     camera.stop()
     cap.release()
     notification_executor.shutdown(wait=False)  # Don't wait for pending notifications
+    save_executor.shutdown(wait=False)

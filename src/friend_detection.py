@@ -7,7 +7,6 @@ from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 from contextlib import redirect_stdout, redirect_stderr
 from io import StringIO
-from sklearn.metrics.pairwise import cosine_similarity
 
 # Suppress FutureWarning from insightface/skimage before importing
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -40,6 +39,8 @@ class DoorFaceRecognizer:
                 )
                 self.app.prepare(ctx_id=0, det_size=det_size)
         self.gallery: Dict[str, np.ndarray] = {}
+        self._gallery_names: List[str] = []
+        self._gallery_protos: Optional[np.ndarray] = None
 
     def _embed(self, img: np.ndarray, strict: bool = True) -> Optional[np.ndarray]:
         """
@@ -160,18 +161,28 @@ class DoorFaceRecognizer:
                 print(f"  {person_dir.name}: no embeddings")
                 
         self.gallery = gallery
+        # Cache matrix for fast similarity (cosine == dot for L2-normalized vectors)
+        if gallery:
+            self._gallery_names = list(gallery.keys())
+            self._gallery_protos = np.vstack([gallery[n] for n in self._gallery_names])
+        else:
+            self._gallery_names = []
+            self._gallery_protos = None
         print(f"Gallery complete: {list(gallery.keys())}")
+
+    def _get_gallery_matrix(self) -> Tuple[List[str], Optional[np.ndarray]]:
+        if not self._gallery_names or self._gallery_protos is None:
+            return [], None
+        return self._gallery_names, self._gallery_protos
 
     def identify_all(self, crops: List[np.ndarray], sim_thresh=0.70) -> List[Tuple[Optional[str], float]]:
         """
         Identify all faces in crops. Returns a list of (name, similarity) for each crop.
         Returns (None, sim) if no match above threshold.
         """
-        if not self.gallery:
+        names, protos = self._get_gallery_matrix()
+        if protos is None:
             return [(None, 0.0) for _ in crops]
-        
-        names, protos = zip(*self.gallery.items())
-        protos = np.vstack(protos)
         results = []
         
         for i, crop in enumerate(crops):
@@ -186,7 +197,7 @@ class DoorFaceRecognizer:
                 results.append((None, 0.0))
                 continue
             
-            sims = cosine_similarity([e], protos)[0]
+            sims = protos @ e
             idx = int(np.argmax(sims))
             best_sim = float(sims[idx])
             best_name = names[idx] if best_sim >= sim_thresh else None
@@ -207,11 +218,9 @@ class DoorFaceRecognizer:
         Returns:
             List of (name, similarity) tuples for each face
         """
-        if not self.gallery:
+        names, protos = self._get_gallery_matrix()
+        if protos is None:
             return [(None, 0.0) for _ in faces]
-        
-        names, protos = zip(*self.gallery.items())
-        protos = np.vstack(protos)
         results = []
         
         for i, face in enumerate(faces):
@@ -222,7 +231,7 @@ class DoorFaceRecognizer:
                 results.append((None, 0.0))
                 continue
             
-            sims = cosine_similarity([e], protos)[0]
+            sims = protos @ e
             idx = int(np.argmax(sims))
             best_sim = float(sims[idx])
             best_name = names[idx] if best_sim >= sim_thresh else None

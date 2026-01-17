@@ -6,7 +6,8 @@ def process_mog2(frame,
                  kernel,
                  BRIGHTNESS_RESET_DELTA,
                  ADAPT_LR,
-                 MOTION_THRESHOLD):
+                 MOTION_THRESHOLD,
+                 draw_overlay: bool = True):
     """Apply MOG2, handle brightness reinit, morphology and motion detection.
     Returns: (backSub, prev_brightness, fgMask, motion_detected)
     """
@@ -30,7 +31,8 @@ def process_mog2(frame,
     if motion_detected:
         print(f"Motion detected! Pixels: {motion_pixels}")
         backSub.apply(frame, learningRate=0)
-        cv.putText(frame, "MOTION DETECTED", (10, 30),
-                   cv.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+        if draw_overlay:
+            cv.putText(frame, "MOTION DETECTED", (10, 30),
+                       cv.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
 
     return backSub, prev_brightness, fgMask, motion_detected
