@@ -43,12 +43,12 @@ class DoorNotifier:
     
     async def _send_message_async(self, text: str) -> bool:
         """Send a text message asynchronously."""
-        if not self.is_configured():
+        if not self.is_configured() or self.bot is None:
             print(f"Telegram not configured. Would send: {text}")
             return False
         
         try:
-            await self.bot.send_message(chat_id=self.chat_id, text=text)
+            await self.bot.send_message(chat_id=self.chat_id, text=text, read_timeout=30, write_timeout=30, connect_timeout=30)
             return True
         except TelegramError as e:
             print(f"Telegram error: {e}")
@@ -56,13 +56,13 @@ class DoorNotifier:
     
     async def _send_photo_async(self, photo_path: str, caption: str = "") -> bool:
         """Send a photo asynchronously."""
-        if not self.is_configured():
+        if not self.is_configured() or self.bot is None:
             print(f"Telegram not configured. Would send photo: {photo_path}")
             return False
         
         try:
             with open(photo_path, "rb") as photo:
-                await self.bot.send_photo(chat_id=self.chat_id, photo=photo, caption=caption)
+                await self.bot.send_photo(chat_id=self.chat_id, photo=photo, caption=caption, read_timeout=30, write_timeout=30, connect_timeout=30)
             return True
         except (TelegramError, FileNotFoundError) as e:
             print(f"Telegram error: {e}")

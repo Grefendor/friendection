@@ -71,7 +71,7 @@ to_be_labeled_dir.mkdir(parents=True, exist_ok=True)
 
 # Detection and recognition thresholds
 MOTION_THRESHOLD = 16000  # Minimum pixels for motion detection
-BLUR_THRESHOLD = 100.0  # Laplacian variance threshold for blur detection
+BLUR_THRESHOLD = 40.0  # Laplacian variance threshold for blur detection
 CAPTURE_ATTEMPTS = 5  # Number of frames to capture for best quality selection
 RECOGNITION_THRESHOLD = 2  # Required consecutive recognitions for confirmation
 COOLDOWN_SECONDS = 300  # Notification cooldown per person (seconds)
@@ -127,7 +127,7 @@ def capture_sharpest_faces(
     GOOD_SHARPNESS_THRESHOLD = 200.0  # If sharpness exceeds this, return immediately
     
     best_frame = None
-    best_faces = None
+    best_faces: List = []
     best_sharpness = 0.0
     best_attempt = -1
 
