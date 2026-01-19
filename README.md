@@ -4,6 +4,19 @@ A real-time door camera application that detects motion, captures faces, recogni
 
 ---
 
+## ⚠️ Legal Notice & Consent Requirements
+
+**IMPORTANT: This software uses facial recognition technology.**
+
+Before using this software:
+- **Get consent** from anyone whose face will be captured and stored
+- **Check your local laws** - facial recognition may be restricted in your jurisdiction (GDPR, BIPA, CCPA, etc.)
+- **Understand your responsibilities** - you are solely responsible for compliance with applicable laws
+
+This is a personal project created for educational purposes. If you use or modify this software, ensure you comply with all relevant laws and obtain proper consent.
+
+---
+
 ## Disclaimer
 
 This README and the comments within the source code were generated with AI assistance.
@@ -29,10 +42,11 @@ This README and the comments within the source code were generated with AI assis
 - Motion detection using OpenCV MOG2 with adaptive background modeling and automatic brightness compensation
 - Face detection and recognition using InsightFace (buffalo_l model)
 - Image quality filtering with sharpness analysis to capture optimal frames
+- **Bootstrap mode**: Start with empty gallery - automatically captures faces to `ToBeLabeled/` folder for manual organization into `friends_db/`
 - Multi-frame confirmation system to reduce false positives
 - Cooldown mechanism to prevent notification spam
-- Automatic gallery expansion for high-confidence recognitions
-- Manual review queue for uncertain detections
+- Automatic gallery expansion for high-confidence recognitions (≥80% similarity)
+- Manual review queue for uncertain detections in `ToBeLabeled/` folder
 - Telegram notifications with photo attachments
 - Automatic GPU detection and utilization (CUDA, TensorRT) when available
 - Optimized for edge devices (Raspberry Pi, NVIDIA Jetson)
@@ -93,7 +107,22 @@ pip install onnxruntime-gpu
 
 ### Friend Gallery
 
-Create a directory structure for known individuals:
+You can build your friends database in two ways:
+
+#### Option 1: Start from Scratch (Bootstrap Mode)
+
+1. Run the application with an empty or non-existent `friends_db/` folder
+2. The system will capture all detected faces to `ToBeLabeled/`
+3. Manually organize captured faces by creating person folders:
+   ```bash
+   mkdir -p friends_db/PersonName
+   mv ToBeLabeled/captured_*.jpg friends_db/PersonName/
+   ```
+4. Restart the application to load the new gallery
+
+#### Option 2: Pre-populate with Photos
+
+Create a directory structure with existing photos:
 
 ```
 friends_db/
@@ -109,6 +138,7 @@ Guidelines:
 - Use 5-10 photos per person with varied lighting and angles
 - Both full images and cropped faces are accepted
 - Supported formats: JPG, JPEG, PNG, BMP, WEBP
+- **IMPORTANT**: Only add photos of individuals who have explicitly consented to facial recognition
 
 ### Telegram Notifications
 
@@ -138,9 +168,34 @@ The application will:
 1. Initialize the camera and face recognition models
 2. Continuously monitor for motion
 3. When motion is detected, attempt face detection
-4. Compare detected faces against the gallery
+4. Compare detected faces against the gallery (if it exists)
 5. Send notifications for confirmed recognitions
-6. Save unknown faces to `ToBeLabeled/` for manual review
+6. Automatically manage captured faces:
+   - **No gallery exists**: All faces saved to `ToBeLabeled/` as `captured_*.jpg`
+   - **Gallery exists, person recognized with ≥80% confidence**: Auto-added to their folder in `friends_db/`
+   - **Gallery exists, person recognized with <80% confidence**: Saved to `ToBeLabeled/` with person's name for manual review
+   - **Unknown person**: Saved to `ToBeLabeled/` as `unknown_*.jpg`
+
+### Managing Captured Faces
+
+Periodically review the `ToBeLabeled/` folder:
+
+```bash
+# Review captured faces
+ls -lh ToBeLabeled/
+
+# Add a new person to the gallery (after obtaining consent!)
+mkdir -p friends_db/PersonName
+mv ToBeLabeled/captured_* friends_db/PersonName/
+
+# Move uncertain matches to confirm identity
+mv ToBeLabeled/PersonName_*.jpg friends_db/PersonName/
+
+# Delete unwanted captures
+rm ToBeLabeled/unknown_*.jpg
+```
+
+After modifying `friends_db/`, restart the application to rebuild the gallery.
 
 To stop the application, press `Ctrl+C`.
 
@@ -175,7 +230,7 @@ Key parameters in `main.py`:
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | MOTION_THRESHOLD | 16000 | Pixel count threshold for motion detection |
-| BLUR_THRESHOLD | 100.0 | Minimum Laplacian variance (higher = stricter) |
+| BLUR_THRESHOLD | 40.0 | Minimum Laplacian variance (higher = stricter) |
 | CAPTURE_ATTEMPTS | 5 | Frames sampled to find sharpest face |
 | RECOGNITION_THRESHOLD | 2 | Confirmations required before notification |
 | COOLDOWN_SECONDS | 300 | Seconds before re-notifying for same person |

@@ -263,48 +263,57 @@ try:
                                     crops.append(None)
                                     print(f"Skipped blurry face {i}")
 
-                            if best_faces and recognizer.gallery:
-                                results = recognizer.identify_from_faces(best_faces, sim_thresh=0.70)
-                                current_time = time_time()
-                                
-                                for idx, (name, sim) in enumerate(results):
-                                    crop = crops[idx] if idx < len(crops) else None
-                                    if crop is None:
-                                        print("  Skipping notification/save: crop not available")
-                                        continue
-                                    
-                                    if name:
-                                        if name in last_confirmed:
-                                            elapsed = current_time - last_confirmed[name]
-                                            if elapsed < COOLDOWN_SECONDS:
-                                                print(f"  {name} on cooldown ({COOLDOWN_SECONDS - elapsed:.1f}s remaining)")
-                                                continue
-                                        
-                                        recognition_votes[name] = recognition_votes.get(name, 0) + 1
-                                        print(f"  Vote for {name}: {recognition_votes[name]}/{RECOGNITION_THRESHOLD} (sim={sim:.3f})")
-                                        
-                                        if recognition_votes[name] >= RECOGNITION_THRESHOLD:
-                                            print(f"*** CONFIRMED: {name} at the door! ***")
-                                            last_confirmed[name] = current_time
-                                            recognition_votes[name] = 0
-                                            
-                                            if sim >= AUTO_LABEL_THRESHOLD:
-                                                dest_dir = friends_db / name
-                                                dest_dir.mkdir(parents=True, exist_ok=True)
-                                                dest_path = dest_dir / f"{ts_ms}_{idx}.jpg"
-                                                submit_save(dest_path, crop, (name, sim, str(dest_path)))
-                                                print(f"  Auto-added to {dest_dir.name}/ (sim={sim:.0%})")
-                                            else:
-                                                dest_path = to_be_labeled_dir / f"{name}_{ts_ms}_{idx}.jpg"
-                                                submit_save(dest_path, crop, (name, sim, str(dest_path)))
-                                                print(f"  Saved to ToBeLabeled/ for review (sim={sim:.0%})")
-                                    else:
-                                        print(f"  Unknown visitor (best_sim={sim:.3f})")
-                                        dest_path = to_be_labeled_dir / f"unknown_{ts_ms}_{idx}.jpg"
+                            if best_faces:
+                                if recognizer.gallery:
+                                    # Gallery exists - perform recognition
+                                    results = recognizer.identify_from_faces(best_faces, sim_thresh=0.70)
+                                    current_time = time_time()
+
+                                    for idx, (name, sim) in enumerate(results):
+                                        crop = crops[idx] if idx < len(crops) else None
+                                        if crop is None:
+                                            print("  Skipping notification/save: crop not available")
+                                            continue
+
+                                        if name:
+                                            if name in last_confirmed:
+                                                elapsed = current_time - last_confirmed[name]
+                                                if elapsed < COOLDOWN_SECONDS:
+                                                    print(f"  {name} on cooldown ({COOLDOWN_SECONDS - elapsed:.1f}s remaining)")
+                                                    continue
+
+                                            recognition_votes[name] = recognition_votes.get(name, 0) + 1
+                                            print(f"  Vote for {name}: {recognition_votes[name]}/{RECOGNITION_THRESHOLD} (sim={sim:.3f})")
+
+                                            if recognition_votes[name] >= RECOGNITION_THRESHOLD:
+                                                print(f"*** CONFIRMED: {name} at the door! ***")
+                                                last_confirmed[name] = current_time
+                                                recognition_votes[name] = 0
+
+                                                if sim >= AUTO_LABEL_THRESHOLD:
+                                                    dest_dir = friends_db / name
+                                                    dest_dir.mkdir(parents=True, exist_ok=True)
+                                                    dest_path = dest_dir / f"{ts_ms}_{idx}.jpg"
+                                                    submit_save(dest_path, crop, (name, sim, str(dest_path)))
+                                                    print(f"  Auto-added to {dest_dir.name}/ (sim={sim:.0%})")
+                                                else:
+                                                    dest_path = to_be_labeled_dir / f"{name}_{ts_ms}_{idx}.jpg"
+                                                    submit_save(dest_path, crop, (name, sim, str(dest_path)))
+                                                    print(f"  Saved to ToBeLabeled/ for review (sim={sim:.0%})")
+                                        else:
+                                            print(f"  Unknown visitor (best_sim={sim:.3f})")
+                                            dest_path = to_be_labeled_dir / f"unknown_{ts_ms}_{idx}.jpg"
+                                            submit_save(dest_path, crop)
+                                            print(f"  Saved unknown face to ToBeLabeled/")
+                                else:
+                                    # Gallery empty - capture mode: save all faces to ToBeLabeled
+                                    print("Gallery empty - capture mode: saving all faces to ToBeLabeled/")
+                                    for idx, crop in enumerate(crops):
+                                        if crop is None:
+                                            continue
+                                        dest_path = to_be_labeled_dir / f"captured_{ts_ms}_{idx}.jpg"
                                         submit_save(dest_path, crop)
-                                        print(f"  Saved unknown face to ToBeLabeled/")
-                            elif not recognizer.gallery:
-                                print("Gallery empty; skip recognition.")
+                                        print(f"  Saved face {idx} to ToBeLabeled/")
 
                         # Clear references and reset person counter for next detection
                         best_frame = None
